@@ -1,5 +1,6 @@
 #include "list.h"
 #include "../debug.h"
+#include <stdio.h>
 
 /* Our doubly linked lists have two header elements: the "head"
    just before the first element and the "tail" just after the
@@ -157,6 +158,14 @@ void
 list_insert (struct list_elem *before, struct list_elem *elem) {
 	ASSERT (is_interior (before) || is_tail (before));
 	ASSERT (elem != NULL);
+
+	/* modify-hojin */
+	// if (elem->prev != NULL && elem->next != NULL && elem->prev->next == elem && elem->next->prev == elem) {
+	// 	printf("modified insert\n\n");
+	// 	elem->prev->next = elem->next;
+	// 	elem->next->prev = elem->prev;
+	// }
+	/* modify-hojin */
 
 	elem->prev = before->prev;
 	elem->next = before;

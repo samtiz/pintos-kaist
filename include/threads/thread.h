@@ -95,6 +95,16 @@ struct thread {
 	/* Shared between thread.c and synch.c. */
 	struct list_elem elem;              /* List element. */
 
+	// [modify-alarmclock]
+	int tick_sleep;
+	// [modify-alarmclock]
+
+	/*modify-priority*/
+	struct list having_lock_list;
+	struct lock* waiting_lock;
+	int origin_priority;
+	/*modify-priority*/
+
 #ifdef USERPROG
 	/* Owned by userprog/process.c. */
 	uint64_t *pml4;                     /* Page map level 4 */
@@ -142,5 +152,18 @@ int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
 
 void do_iret (struct intr_frame *tf);
+
+// [modify-alarmclock]
+static struct list sleep_list;
+int64_t min_sleep_tick;
+void thread_sleep (int64_t ticks);
+void thread_wake(void);
+// [modify-alarmclock]
+
+/* modify-priority */
+bool priority_less_func (const struct list_elem *a,
+                         const struct list_elem *b,
+                         void *aux);
+/* modify-priority */
 
 #endif /* threads/thread.h */

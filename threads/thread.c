@@ -28,6 +28,12 @@
    that are ready to run but not actually running. */
 static struct list ready_list;
 
+
+// [modify-alarmclock]
+static struct list sleep_list;
+int64_t min_sleep_tick;
+// [modify-alarmclock]
+
 /* Idle thread. */
 static struct thread *idle_thread;
 
@@ -79,6 +85,17 @@ static tid_t allocate_tid (void);
 // setup temporal gdt first.
 static uint64_t gdt[3] = { 0, 0x00af9a000000ffff, 0x00cf92000000ffff };
 
+/*modify-priority*/
+bool priority_less_func (const struct list_elem *a,
+                         const struct list_elem *b,
+                         void *aux){
+	const struct thread* t1 = list_entry(a, struct thread, elem);
+	const struct thread* t2 = list_entry(b, struct thread, elem);
+
+	return t1->priority > t2->priority;
+}
+
+
 /* Initializes the threading system by transforming the code
    that's currently running into a thread.  This can't work in
    general and it is possible in this case only because loader.S
@@ -94,6 +111,7 @@ static uint64_t gdt[3] = { 0, 0x00af9a000000ffff, 0x00cf92000000ffff };
    finishes. */
 void
 thread_init (void) {
+
 	ASSERT (intr_get_level () == INTR_OFF);
 
 	/* Reload the temporal gdt for the kernel
@@ -109,12 +127,24 @@ thread_init (void) {
 	lock_init (&tid_lock);
 	list_init (&ready_list);
 	list_init (&destruction_req);
+	// [modify-alarmclock]
+	list_init(&sleep_list);
+	min_sleep_tick = INT64_MAX;
+	// [modify-alarmclock]
+
+	/*
+	if(!list_end (&sleep_list)->prev) printf("null\n\n");
+	else printf("not null\n\n");*/
 
 	/* Set up a thread structure for the running thread. */
 	initial_thread = running_thread ();
 	init_thread (initial_thread, "main", PRI_DEFAULT);
 	initial_thread->status = THREAD_RUNNING;
 	initial_thread->tid = allocate_tid ();
+
+	// [modify-alarmclock]
+	initial_thread->tick_sleep = 0;
+	// [modify-alarmclock]
 }
 
 /* Starts preemptive thread scheduling by enabling interrupts.
@@ -153,6 +183,54 @@ thread_tick (void) {
 	if (++thread_ticks >= TIME_SLICE)
 		intr_yield_on_return ();
 }
+
+// [modify-alarmclock]
+void thread_sleep(int64_t ticks) {
+	struct thread *curr = thread_current ();
+
+	ASSERT (intr_get_level () == INTR_ON);
+	ASSERT (curr != idle_thread)
+
+	enum intr_level old_level;
+	old_level = intr_disable ();
+
+	int64_t curticks = timer_ticks();
+	
+	curr->tick_sleep = ticks + curticks;
+	list_push_back (&sleep_list, &curr->elem);
+
+	if (min_sleep_tick > (ticks+curticks)) {
+		min_sleep_tick = (ticks+curticks);
+	}
+	thread_block();
+	intr_set_level (old_level);
+}
+
+void thread_wake(void){
+	
+	if (timer_ticks() >= min_sleep_tick){
+		struct list_elem* element;
+		element = list_begin(&sleep_list);
+		min_sleep_tick = INT64_MAX;
+		int64_t curticks = timer_ticks();
+		while (element!= list_tail(&sleep_list)){
+			struct thread *t;
+			t = list_entry(element, struct thread, elem);
+			element = list_next(element);
+			if (t->tick_sleep <= curticks) {
+				t->tick_sleep = 0;
+				list_remove(&t->elem);
+				thread_unblock(t);
+			}
+			else{
+				if (min_sleep_tick > t->tick_sleep) {
+					min_sleep_tick = t->tick_sleep;
+				}
+			}
+		}
+	}
+}
+// [modify-alarmclock]
 
 /* Prints thread statistics. */
 void
@@ -206,6 +284,10 @@ thread_create (const char *name, int priority,
 
 	/* Add to run queue. */
 	thread_unblock (t);
+	
+	/* modify-priority */
+	yield_if_lower();
+	/* modify-priority */
 
 	return tid;
 }
@@ -240,7 +322,10 @@ thread_unblock (struct thread *t) {
 
 	old_level = intr_disable ();
 	ASSERT (t->status == THREAD_BLOCKED);
-	list_push_back (&ready_list, &t->elem);
+	/*modify-priority*/
+	// list_push_back (&ready_list, &t->elem);
+	list_insert_ordered(&ready_list, &t->elem, priority_less_func, NULL);
+	/*modify-priority*/
 	t->status = THREAD_READY;
 	intr_set_level (old_level);
 }
@@ -303,15 +388,32 @@ thread_yield (void) {
 
 	old_level = intr_disable ();
 	if (curr != idle_thread)
-		list_push_back (&ready_list, &curr->elem);
+		/*modify-priority*/
+		list_insert_ordered(&ready_list, &curr->elem, priority_less_func, NULL);
+		/*modify-priority*/
+		// list_push_back (&ready_list, &curr->elem);
 	do_schedule (THREAD_READY);
 	intr_set_level (old_level);
 }
+
+/* modify-priority */
+void yield_if_lower (void){
+	if (list_empty(&ready_list)) {
+		return;
+	}
+	int curr_priority = thread_current()->priority;
+	int highest_priority = list_entry(list_begin(&ready_list), struct thread, elem)->priority;
+	if (curr_priority < highest_priority){
+		thread_yield();
+	}
+}
+/* modify-priority */
 
 /* Sets the current thread's priority to NEW_PRIORITY. */
 void
 thread_set_priority (int new_priority) {
 	thread_current ()->priority = new_priority;
+	yield_if_lower();
 }
 
 /* Returns the current thread's priority. */
@@ -409,6 +511,9 @@ init_thread (struct thread *t, const char *name, int priority) {
 	t->tf.rsp = (uint64_t) t + PGSIZE - sizeof (void *);
 	t->priority = priority;
 	t->magic = THREAD_MAGIC;
+	list_init(&t->having_lock_list);
+	t->waiting_lock = NULL;
+	t->origin_priority = priority;
 }
 
 /* Chooses and returns the next thread to be scheduled.  Should
