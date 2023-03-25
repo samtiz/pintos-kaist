@@ -267,14 +267,10 @@ lock_release (struct lock *lock) {
 	/*modify-priority*/
 	struct thread* curr = thread_current();
 	int max_priority = curr->origin_priority;
-	// curr->priority = curr->origin_priority;
-	for (struct list_elem* e = list_begin(&curr->having_lock_list); e!=list_tail(&curr->having_lock_list); e = e->next){
-		struct list e_waiters = list_entry(e, struct lock, elem)->semaphore.waiters;
-		list_sort(&e_waiters, priority_less_func, NULL);
-		struct thread* t = list_entry(list_begin(&e_waiters), struct thread, elem);
-		// if (curr->priority < t->priority){
-		// 	curr->priority = t->priority;
-		// }
+	for (struct list_elem* e = list_begin(&curr->having_lock_list); e!=list_tail(&curr->having_lock_list); e = list_next(e)){
+		struct list* e_waiters_p = &list_entry(e, struct lock, elem)->semaphore.waiters;
+		list_sort(e_waiters_p, priority_less_func, NULL);
+		struct thread* t = list_entry(list_begin(e_waiters_p), struct thread, elem);
 		if (max_priority < t->priority){
 			max_priority = t->priority;
 		}
