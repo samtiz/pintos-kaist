@@ -94,6 +94,7 @@ bool priority_less_func (const struct list_elem *a,
 
 	return t1->priority > t2->priority;
 }
+/*modify-priority*/
 
 
 /* Initializes the threading system by transforming the code
