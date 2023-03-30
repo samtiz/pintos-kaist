@@ -105,6 +105,10 @@ struct thread {
 	int origin_priority;
 	/*modify-priority*/
 
+	/*modify-mlfqs*/
+	int nice;
+	/*modify-mlfqs*/
+
 #ifdef USERPROG
 	/* Owned by userprog/process.c. */
 	uint64_t *pml4;                     /* Page map level 4 */
@@ -123,6 +127,14 @@ struct thread {
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
 extern bool thread_mlfqs;
+
+/* modify-mlfqs */
+struct priority_queue {
+	int priority;
+	struct list queue;
+	struct list_elem elem;
+};
+/* modify-mlfqs */
 
 void thread_init (void);
 void thread_start (void);
