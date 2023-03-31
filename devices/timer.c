@@ -128,7 +128,7 @@ timer_interrupt (struct intr_frame *args UNUSED) {
 	thread_tick ();
 
 	// [modify-alarmclock]
-	thread_wake();
+	if (ticks % 4 == 0) thread_wake();
 	// [modify-alarmclock]
 }
 

@@ -53,9 +53,7 @@ static struct list destruction_req;
 /* modify-mlfqs */
 static struct list priority_queue_list;
 static int load_avg; 	// fixed_point
-static int recent_cpu;  // fixed_point
 static int ready_thread;
-static int cnt; //debug
 /* modify-mlfqs */
 
 
@@ -97,6 +95,11 @@ static tid_t allocate_tid (void);
 // Because the gdt will be setup after the thread_init, we should
 // setup temporal gdt first.
 static uint64_t gdt[3] = { 0, 0x00af9a000000ffff, 0x00cf92000000ffff };
+
+static bool
+is_interior (struct list_elem *elem) {
+	return elem != NULL && elem->prev != NULL && elem->next != NULL;
+}
 
 /*modify-priority*/
 bool priority_less_func (const struct list_elem *a,
@@ -158,8 +161,7 @@ thread_init (void) {
 	}
 
 	load_avg = int_to_fixed_p(0);
-	ready_thread = 0;
-	cnt = 0; //debug
+	ready_thread = 1;
 	/*modify-mlfqs*/
 
 	/* Set up a thread structure for the running thread. */
@@ -177,7 +179,7 @@ thread_init (void) {
 	initial_thread->tid = allocate_tid ();
 
 	// [modify-alarmclock]
-	initial_thread->tick_sleep = 0;
+	initial_thread->tick_sleep = INT64_MAX;
 	// [modify-alarmclock]
 
 	
@@ -201,14 +203,21 @@ thread_start (void) {
 	// printf("here4\n");
 }
 
+void clip_priority(struct thread* t) {
+	if (t->priority < PRI_MIN) t->priority = PRI_MIN;
+	else if (t->priority > PRI_MAX) t->priority = PRI_MAX;
+}
+
 /* Called by the timer interrupt handler at each timer tick.
    Thus, this function runs in an external interrupt context. */
 void
 thread_tick (void) {
-	struct thread *t = thread_current ();
+
+
+	struct thread *curr = thread_current ();
 
 	/* Update statistics. */
-	if (t == idle_thread)
+	if (curr == idle_thread)
 		idle_ticks++;
 #ifdef USERPROG
 	else if (t->pml4 != NULL)
@@ -217,22 +226,94 @@ thread_tick (void) {
 	else
 		kernel_ticks++;
 
+	/*modify-mlfqs*/
+	curr->recent_cpu++;
+	/*modify-mlfqs*/
+
 	/* Enforce preemption. */
 	if (++thread_ticks >= TIME_SLICE)
 		intr_yield_on_return ();
 
 	/*modify-mlfqs*/
 	if (thread_mlfqs) {
-		if (timer_ticks() % TIMER_FREQ == 0) {
-			int x = int_to_fixed_p(59);
-			int z = int_to_fixed_p(1);
-			int y = int_to_fixed_p(60);
+		enum intr_level old_level;
+		old_level = intr_disable ();
+		int64_t curr_tick = timer_ticks();
+		if (curr_tick % TIMER_FREQ == 0) { // every 1 seconds
+			int x, y, z, alpha, beta;
+			x = int_to_fixed_p(59);
+			z = int_to_fixed_p(1);
+			y = int_to_fixed_p(60);
 			
-			int alpha = fixed_p_div_fixed_p(x, y);     // 59/60
-			int beta = fixed_p_sub_fixed_p(z, alpha);  // 1/60
+			alpha = fixed_p_div_fixed_p(x, y);     // 59/60
+			beta = fixed_p_sub_fixed_p(z, alpha);  // 1/60
 
+			// load avg update
 			load_avg = fixed_p_add_fixed_p(fixed_p_mul_fixed_p(alpha, load_avg), fixed_p_mul_int(beta, ready_thread));
+			barrier();
+
+			// recent cpu update through priority_queue_list
+			for (struct list_elem* e_ql = list_begin(&priority_queue_list); e_ql != list_end(&priority_queue_list); e_ql = list_next(e_ql)) {
+				struct priority_queue* q = list_entry(e_ql, struct priority_queue, elem);
+				for (struct list_elem* e_q = list_begin(&q->queue); e_q != list_end(&q->queue); e_q = list_next(e_q)) {
+					struct thread* th = list_entry(e_q, struct thread, elem);
+					th->recent_cpu = fixed_p_add_int(fixed_p_mul_fixed_p(fixed_p_div_fixed_p(fixed_p_mul_int(load_avg, 2), fixed_p_add_int(fixed_p_mul_int(load_avg, 2), 1)), th->recent_cpu), th->nice);
+				}
+			}
+			// recent cpu update current thread
+			curr->recent_cpu = fixed_p_add_int(fixed_p_mul_fixed_p(fixed_p_div_fixed_p(fixed_p_mul_int(load_avg, 2), fixed_p_add_int(fixed_p_mul_int(load_avg, 2), 1)), curr->recent_cpu), curr->nice);
+
+			// recent cpu update through sleep list
+			for (struct list_elem* e_s = list_begin(&sleep_list); e_s != list_end(&sleep_list); e_s = list_next(e_s)) {
+				struct thread* t = list_entry(e_s, struct thread, elem);
+				t->recent_cpu = fixed_p_add_int(fixed_p_mul_fixed_p(fixed_p_div_fixed_p(fixed_p_mul_int(load_avg, 2), fixed_p_add_int(fixed_p_mul_int(load_avg, 2), 1)), t->recent_cpu), t->nice);
+			}
+			// recent cpu update done
 		}
+		if (curr_tick % 4 == 0) {
+			int p_max = int_to_fixed_p(PRI_MAX); // fixed point pri max
+
+			// priority update through priority_queue_list
+			for (struct list_elem* e_ql = list_begin(&priority_queue_list); e_ql != list_end(&priority_queue_list); e_ql = list_next(e_ql)) {
+				struct priority_queue* q = list_entry(e_ql, struct priority_queue, elem);
+				for (struct list_elem* e_q = list_begin(&q->queue); e_q != list_end(&q->queue); e_q = list_next(e_q)) {
+					struct thread* th = list_entry(e_q, struct thread, elem);
+					int p; // fixed_point of priority value
+					p = fixed_p_sub_fixed_p(p_max, fixed_p_add_fixed_p(fixed_p_div_int(th->recent_cpu, 4), fixed_p_mul_int(th->nice, 2)));
+					th->priority = fixed_p_to_int_down(p);
+
+					clip_priority(th);
+
+					if (th->priority != q->priority){
+						list_remove(e_q);
+						struct list_elem* temp_e_ql = list_rbegin(&priority_queue_list);
+						for (int i = PRI_MIN; i < th->priority; i++){
+							temp_e_ql = list_prev(temp_e_ql);
+						}
+						struct priority_queue* temp_q = list_entry(temp_e_ql, struct priority_queue, elem);
+						list_push_back(&temp_q->queue, e_q);
+					}
+				}
+			}
+
+			// priority update current thread
+			int curr_p; // fixed_point of current priority value
+			curr_p = fixed_p_sub_fixed_p(p_max, fixed_p_add_fixed_p(fixed_p_div_int(curr->recent_cpu, 4), fixed_p_mul_int(curr->nice, 2)));
+			curr->priority = fixed_p_to_int_down(curr_p);
+
+			clip_priority(curr);
+
+			//priority update through sleep list
+			for (struct list_elem* e_s = list_begin(&sleep_list); e_s != list_end(&sleep_list); e_s = list_end(e_s)) {
+				struct thread* t = list_entry(e_s, struct thread, elem);
+				int p_s;
+				p_s = fixed_p_sub_fixed_p(p_max, fixed_p_add_fixed_p(fixed_p_div_int(t->recent_cpu, 4), fixed_p_mul_int(t->nice, 2)));
+				t->priority = fixed_p_to_int_down(p_s);
+
+				clip_priority(t);
+			}
+		}
+		intr_set_level (old_level);
 	}
 	/*modify-mlfqs*/
 }
@@ -262,7 +343,7 @@ void thread_sleep(int64_t ticks) {
 		}
 		if (e == list_tail(&ready_list)) list_remove(&curr->elem);
 	}
-	list_push_back (&sleep_list, &curr->elem);
+	// list_push_back (&sleep_list, &curr->elem);
 
 	if (min_sleep_tick > (ticks+curticks)) {
 		min_sleep_tick = (ticks+curticks);
@@ -284,10 +365,10 @@ void thread_wake(void){
 			t = list_entry(element, struct thread, elem);
 			element = list_next(element);
 			if (t->tick_sleep <= curticks) {
-				t->tick_sleep = 0;
-				list_remove(&t->elem);
-				t->elem.prev = NULL;
-				t->elem.next = NULL;
+				t->tick_sleep = INT64_MAX;
+				// list_remove(&t->elem);
+				// t->elem.prev = NULL;
+				// t->elem.next = NULL;
 				thread_unblock(t);
 			}
 			else{
@@ -375,14 +456,18 @@ void
 thread_block (void) {
 	ASSERT (!intr_context ());
 	ASSERT (intr_get_level () == INTR_OFF);
+	ASSERT (ready_thread >= 0);
 	
+	struct thread* curr = thread_current();
 	/*modify-mlfqs*/
 	if (thread_mlfqs) {
-		ready_thread--;
+		//TODO
+		if (curr->elem.prev != NULL && curr->elem.next != NULL) printf("why running thread is inside some list?");
+		if (strcmp(thread_current()->name, "idle")) ready_thread--;
 	}
 	else {
 		/*modify-mlfqs*/
-		struct list_elem* e = &thread_current()->elem;
+		struct list_elem* e = &curr->elem;
 		if (e != NULL && e->prev != NULL && e->next != NULL) {
 			while(true){
 				if (e != NULL && e->prev != NULL && e->next == NULL) {
@@ -393,15 +478,16 @@ thread_block (void) {
 				}
 			}
 			if (e == list_tail(&ready_list)) {
-				list_remove(&thread_current()->elem); // remove from ready list only
-				thread_current()->elem.next = NULL;
-				thread_current()->elem.prev = NULL;
+				list_remove(&curr->elem); // remove from ready list only
+				curr->elem.next = NULL;
+				curr->elem.prev = NULL;
 			}
 		}
 		/*modify-mlfqs*/
 	}
+	list_push_back(&sleep_list, &curr->elem);
 	/*modify-mlfqs*/
-	thread_current ()->status = THREAD_BLOCKED;
+	curr->status = THREAD_BLOCKED;
 	schedule ();
 }
 
@@ -418,10 +504,16 @@ thread_unblock (struct thread *t) {
 	enum intr_level old_level;
 
 	ASSERT (is_thread (t));
+	ASSERT (ready_thread >= 0);
 
 	old_level = intr_disable ();
 	ASSERT (t->status == THREAD_BLOCKED);
 	/*modify-priority*/
+	if (is_interior(&t->elem)) {
+		list_remove(&t->elem);
+		t->elem.prev = NULL;
+		t->elem.next = NULL;
+	}
 	// list_push_back (&ready_list, &t->elem);
 	if (!thread_mlfqs) {
 		list_insert_ordered(&ready_list, &t->elem, priority_less_func, NULL);
@@ -430,7 +522,18 @@ thread_unblock (struct thread *t) {
 	/*modify-mlfqs*/
 	else {
 		//TODO
-		if (strcmp(t->name, "idle") != 0) ready_thread++;
+
+		// push back to priority queue which has same priority
+		for (struct list_elem* e_ql = list_begin(&priority_queue_list); e_ql != list_end(&priority_queue_list); e_ql = list_next(e_ql)) {
+			struct priority_queue* q = list_entry(e_ql, struct priority_queue, elem);
+			if (q->priority == t->priority) {
+				list_push_back(&q->queue, &t->elem);
+				break;
+			}
+		}
+
+		// ready thread counting
+		if (strcmp(t->name, "idle")) ready_thread++;
 	}
 	/*modify-mlfqs*/
 	t->status = THREAD_READY;
@@ -481,7 +584,8 @@ thread_exit (void) {
 	   We will be destroyed during the call to schedule_tail(). */
 	intr_disable ();
 	/*modify-mlfqs*/
-	ready_thread--;
+	if (strcmp(thread_current()->name, "idle")) ready_thread--;
+	
 	/*modify-mlfqs*/
 	do_schedule (THREAD_DYING);
 	NOT_REACHED ();
@@ -496,39 +600,44 @@ thread_yield (void) {
 	enum intr_level old_level;
 	old_level = intr_disable ();
 
-	/*modify-mlfqs*/
-	if (list_empty(&ready_list)) {
-		return;
-	}
-	/*modify-mlfqs*/
-
-	
 	// if (curr != idle_thread) {
 		/*modify-priority*/
-		if (!thread_mlfqs) {
-			if (!list_empty(&ready_list)){
-				struct list_elem* e = &curr->elem;
-				if (e != NULL && e->prev != NULL && e->next != NULL) {
-					while (true) {
-						if (e != NULL && e->prev != NULL && e->next == NULL) {
-							break;
-						}
-						else {
-							e = list_next(e);
-						}
+	if (!thread_mlfqs) {
+		if (list_empty(&ready_list)) {
+			intr_set_level (old_level);
+			return;
+		}	
+		if (!list_empty(&ready_list)){
+			struct list_elem* e = &curr->elem;
+			if (e != NULL && e->prev != NULL && e->next != NULL) {
+				while (true) {
+					if (e != NULL && e->prev != NULL && e->next == NULL) {
+						break;
 					}
-					if (e == list_tail(&ready_list)) list_remove(&curr->elem);
+					else {
+						e = list_next(e);
+					}
 				}
+				if (e == list_tail(&ready_list)) list_remove(&curr->elem);
 			}
-			list_insert_ordered(&ready_list, &curr->elem, priority_less_func, NULL);
 		}
-		/*modify-priority*/
-		/*modify-mlfqs*/
-		else {
-			//TODO
+		list_insert_ordered(&ready_list, &curr->elem, priority_less_func, NULL);
+	}
+	/*modify-priority*/
+	/*modify-mlfqs*/
+	else {
+		//TODO
+		// push back to priority queue which has same priority
+		if (curr->elem.next != NULL && curr->elem.prev != NULL) printf("why running thread is interior some list?\n");
+		for (struct list_elem* e_ql = list_begin(&priority_queue_list); e_ql != list_end(&priority_queue_list); e_ql = list_next(e_ql)) {
+			struct priority_queue* q = list_entry(e_ql, struct priority_queue, elem);
+			if (q->priority == curr->priority) {
+				list_push_back(&q->queue, &curr->elem);
+				break;
+			}
 		}
+	}
 		/*modify-mlfqs*/
-		// list_push_back (&ready_list, &curr->elem);
 	// }
 	do_schedule (THREAD_READY);
 	intr_set_level (old_level);
@@ -536,11 +645,14 @@ thread_yield (void) {
 
 /* modify-priority */
 void yield_if_lower (void){
+	enum intr_level old_level;
+	old_level = intr_disable ();
 	if (list_empty(&ready_list)) {
+		intr_set_level (old_level);
 		return;
 	}
+	int curr_priority = thread_current()->priority;
 	if (!thread_mlfqs){
-		int curr_priority = thread_current()->priority;
 		int highest_priority = list_entry(list_begin(&ready_list), struct thread, elem)->priority;
 		if (curr_priority < highest_priority){
 			thread_yield();
@@ -549,7 +661,20 @@ void yield_if_lower (void){
 	/*modify-mlfqs*/
 	else {
 		//TODO
+		int highest_priority = -1;
+		for (struct list_elem* e_ql = list_begin(&priority_queue_list); e_ql != list_end(&priority_queue_list); e_ql = list_next(e_ql)) {
+			struct priority_queue* q = list_entry(e_ql, struct priority_queue, elem);
+			if (!list_empty(&q->queue)) {
+				highest_priority = q->priority;
+				break;
+			}
+		}
+		if (highest_priority < 0) printf("do not reach here: why highest priority didn't set?");
+		if (curr_priority < highest_priority){
+			thread_yield();
+		}
 	}
+	intr_set_level (old_level);
 	/*modify-mlfqs*/
 }
 /* modify-priority */
@@ -561,7 +686,7 @@ thread_set_priority (int new_priority) {
 	curr->origin_priority = new_priority;
 	struct list* hll = &curr->having_lock_list;
 	int max_priority = -1;
-	for (struct list_elem* e = list_begin(hll); e != list_tail(hll); e = list_next(e)) {
+	for (struct list_elem* e = list_begin(hll); e != list_end(hll); e = list_next(e)) {
 		if (list_empty(&list_entry(e, struct lock, elem)->semaphore.waiters)) continue;
 		struct thread* t = list_entry(list_front(&list_entry(e, struct lock, elem)->semaphore.waiters), struct thread, elem);
 		if (t->priority > max_priority) max_priority = t->priority;
@@ -603,7 +728,7 @@ thread_get_load_avg (void) {
 int
 thread_get_recent_cpu (void) {
 	/* TODO: Your implementation goes here */
-	return fixed_p_to_int_nearest(fixed_p_mul_int(recent_cpu, 100));
+	return fixed_p_to_int_nearest(fixed_p_mul_int(thread_current()->recent_cpu, 100));
 }
 
 /* Idle thread.  Executes when no other thread is ready to run.
@@ -690,7 +815,6 @@ next_thread_to_run (void) {
 		for (struct list_elem* e = list_begin(&ready_list); e != list_end(&ready_list);
 			 e = list_next(e)) {
 			// printf("%d", list_entry(e, struct thread, elem)->status);
-			cnt++;
 			if (list_entry(e, struct thread, elem)->status == THREAD_READY){
 				e_ = e;
 				list_remove(e);
@@ -710,6 +834,19 @@ next_thread_to_run (void) {
 	/*modify-mlfqs*/
 	else {
 		//TODO
+		struct thread* t;
+		t = idle_thread;
+		for (struct list_elem* e_ql = list_begin(&priority_queue_list); e_ql != list_end(&priority_queue_list); e_ql = list_next(e_ql)) {
+			struct priority_queue* q = list_entry(e_ql, struct priority_queue, elem);
+			if (!list_empty(&q->queue)) {
+				t = list_pop_front(&q->queue);
+				break;
+			}
+			else{
+				continue;
+			}
+		}
+		return t;
 	}
 	/*modify-mlfqs*/
 }

@@ -107,6 +107,8 @@ struct thread {
 
 	/*modify-mlfqs*/
 	int nice;
+	int recent_cpu; // fixed_point
+	struct list_elem sema_elem;
 	/*modify-mlfqs*/
 
 #ifdef USERPROG
