@@ -96,7 +96,7 @@ struct thread {
 	struct list_elem elem;              /* List element. */
 
 	// [modify-alarmclock]
-	int tick_sleep;
+	int64_t tick_sleep;
 	// [modify-alarmclock]
 
 	/*modify-priority*/
@@ -129,6 +129,8 @@ struct thread {
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
 extern bool thread_mlfqs;
+
+bool p_q_l_init_done;
 
 /* modify-mlfqs */
 struct priority_queue {
@@ -178,6 +180,10 @@ void thread_wake(void);
 bool priority_less_func (const struct list_elem *a,
                          const struct list_elem *b,
                          void *aux);
+
+bool priority_less_func_mlfqs (const struct list_elem *a,
+                         const struct list_elem *b,
+                         void *aux);						 
 /* modify-priority */
 
 #endif /* threads/thread.h */

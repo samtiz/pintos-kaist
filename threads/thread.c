@@ -112,6 +112,16 @@ bool priority_less_func (const struct list_elem *a,
 }
 /*modify-priority*/
 
+/*modify-mlfqs*/
+bool priority_less_func_mlfqs (const struct list_elem *a,
+                         	   const struct list_elem *b,
+                         	   void *aux){
+	const struct thread* t1 = list_entry(a, struct thread, sema_elem);
+	const struct thread* t2 = list_entry(b, struct thread, sema_elem);
+
+	return t1->priority > t2->priority;
+}
+/*modify-mlfqs*/
 
 /* Initializes the threading system by transforming the code
    that's currently running into a thread.  This can't work in
@@ -149,25 +159,12 @@ thread_init (void) {
 	min_sleep_tick = INT64_MAX;
 	// [modify-alarmclock]
 
-	/*modify-mlfqs*/
-	if (thread_mlfqs) {
-		list_init(&priority_queue_list);
-		for (int i = PRI_MIN; i <= PRI_MAX; i++) {
-			struct priority_queue* q = (struct priority_queue*) malloc(sizeof(struct priority_queue));
-			list_init(&q->queue);
-			q->priority = i;
-			list_push_front(&priority_queue_list, &q->elem);
-		}
-	}
-
-	load_avg = int_to_fixed_p(0);
-	ready_thread = 1;
-	/*modify-mlfqs*/
-
 	/* Set up a thread structure for the running thread. */
 	initial_thread = running_thread ();
 	/*modify-mlfqs*/
+	p_q_l_init_done = false;
 	initial_thread->nice = 0;
+	initial_thread->recent_cpu = 0;
 	// ready_thread++;
 	/*modify-mlfqs*/
 	init_thread (initial_thread, "main", PRI_DEFAULT);
@@ -182,7 +179,10 @@ thread_init (void) {
 	initial_thread->tick_sleep = INT64_MAX;
 	// [modify-alarmclock]
 
-	
+	/*modify-mlfqs*/
+	load_avg = int_to_fixed_p(0);
+	ready_thread = 1;
+	/*modify-mlfqs*/
 }
 
 /* Starts preemptive thread scheduling by enabling interrupts.
@@ -190,17 +190,27 @@ thread_init (void) {
 void
 thread_start (void) {
 	/* Create the idle thread. */
+	if (thread_mlfqs) {
+		list_init(&priority_queue_list);
+		for (int i = PRI_MIN; i <= PRI_MAX; i++) {
+			struct priority_queue* q = (struct priority_queue*) malloc(sizeof(struct priority_queue));
+			memset(q, 0, sizeof(*q));
+			list_init(&q->queue);
+			q->priority = i;
+			list_push_front(&priority_queue_list, &q->elem);
+		}
+	}
+	
 	struct semaphore idle_started;
 	sema_init (&idle_started, 0);
-	// printf("here1\n");
 	thread_create ("idle", PRI_MIN, idle, &idle_started);
-	// printf("here2\n");
+
 	/* Start preemptive thread scheduling. */
 	intr_enable ();
-	// printf("here3\n");
+
 	/* Wait for the idle thread to initialize idle_thread. */
 	sema_down (&idle_started);
-	// printf("here4\n");
+	p_q_l_init_done = true;
 }
 
 void clip_priority(struct thread* t) {
@@ -236,8 +246,8 @@ thread_tick (void) {
 
 	/*modify-mlfqs*/
 	if (thread_mlfqs) {
-		enum intr_level old_level;
-		old_level = intr_disable ();
+		// enum intr_level old_level;
+		// old_level = intr_disable ();
 		int64_t curr_tick = timer_ticks();
 		if (curr_tick % TIMER_FREQ == 0) { // every 1 seconds
 			int x, y, z, alpha, beta;
@@ -246,10 +256,19 @@ thread_tick (void) {
 			y = int_to_fixed_p(60);
 			
 			alpha = fixed_p_div_fixed_p(x, y);     // 59/60
-			beta = fixed_p_sub_fixed_p(z, alpha);  // 1/60
+			beta = fixed_p_div_fixed_p(z, y);      // 1/60
 
 			// load avg update
-			load_avg = fixed_p_add_fixed_p(fixed_p_mul_fixed_p(alpha, load_avg), fixed_p_mul_int(beta, ready_thread));
+			int r_t = 0;
+			if (curr != idle_thread) r_t++;
+			for (struct list_elem* e_ql = list_begin(&priority_queue_list); e_ql != list_end(&priority_queue_list); e_ql = list_next(e_ql)) {
+				struct priority_queue* q = list_entry(e_ql, struct priority_queue, elem);
+				for (struct list_elem* e_q = list_begin(&q->queue); e_q != list_end(&q->queue); e_q = list_next(e_q)) {
+					r_t++;
+				}
+			}
+			// load_avg = fixed_p_add_fixed_p(fixed_p_mul_fixed_p(alpha, load_avg), fixed_p_mul_int(beta, ready_thread));
+			load_avg = fixed_p_add_fixed_p(fixed_p_mul_fixed_p(alpha, load_avg), fixed_p_mul_int(beta, r_t));
 			barrier();
 
 			// recent cpu update through priority_queue_list
@@ -276,7 +295,7 @@ thread_tick (void) {
 			// priority update through priority_queue_list
 			for (struct list_elem* e_ql = list_begin(&priority_queue_list); e_ql != list_end(&priority_queue_list); e_ql = list_next(e_ql)) {
 				struct priority_queue* q = list_entry(e_ql, struct priority_queue, elem);
-				for (struct list_elem* e_q = list_begin(&q->queue); e_q != list_end(&q->queue); e_q = list_next(e_q)) {
+				for (struct list_elem* e_q = list_begin(&q->queue); e_q != list_end(&q->queue); ) {
 					struct thread* th = list_entry(e_q, struct thread, elem);
 					int p; // fixed_point of priority value
 					p = fixed_p_sub_fixed_p(p_max, fixed_p_add_fixed_p(fixed_p_div_int(th->recent_cpu, 4), fixed_p_mul_int(th->nice, 2)));
@@ -285,6 +304,7 @@ thread_tick (void) {
 					clip_priority(th);
 
 					if (th->priority != q->priority){
+						struct list_elem* e_q_next = list_next(e_q);
 						list_remove(e_q);
 						struct list_elem* temp_e_ql = list_rbegin(&priority_queue_list);
 						for (int i = PRI_MIN; i < th->priority; i++){
@@ -292,6 +312,10 @@ thread_tick (void) {
 						}
 						struct priority_queue* temp_q = list_entry(temp_e_ql, struct priority_queue, elem);
 						list_push_back(&temp_q->queue, e_q);
+						e_q = e_q_next;
+					}
+					else {
+						e_q = list_next(e_q);
 					}
 				}
 			}
@@ -304,7 +328,7 @@ thread_tick (void) {
 			clip_priority(curr);
 
 			//priority update through sleep list
-			for (struct list_elem* e_s = list_begin(&sleep_list); e_s != list_end(&sleep_list); e_s = list_end(e_s)) {
+			for (struct list_elem* e_s = list_begin(&sleep_list); e_s != list_end(&sleep_list); e_s = list_next(e_s)) {
 				struct thread* t = list_entry(e_s, struct thread, elem);
 				int p_s;
 				p_s = fixed_p_sub_fixed_p(p_max, fixed_p_add_fixed_p(fixed_p_div_int(t->recent_cpu, 4), fixed_p_mul_int(t->nice, 2)));
@@ -312,21 +336,23 @@ thread_tick (void) {
 
 				clip_priority(t);
 			}
+
+			// keep idle min priority
+			idle_thread->priority = PRI_MIN;
 		}
-		intr_set_level (old_level);
+		// intr_set_level (old_level);
 	}
 	/*modify-mlfqs*/
 }
 
 // [modify-alarmclock]
 void thread_sleep(int64_t ticks) {
-	struct thread *curr = thread_current ();
-
 	ASSERT (intr_get_level () == INTR_ON);
-	ASSERT (curr != idle_thread)
-
 	enum intr_level old_level;
 	old_level = intr_disable ();
+	ASSERT (thread_current() != idle_thread);
+
+	struct thread *curr = thread_current ();
 
 	int64_t curticks = timer_ticks();
 	
@@ -353,8 +379,8 @@ void thread_sleep(int64_t ticks) {
 }
 
 void thread_wake(void){
-	enum intr_level old_level;
-	old_level = intr_disable ();
+	// enum intr_level old_level;
+	// old_level = intr_disable ();
 	if (timer_ticks() >= min_sleep_tick){
 		struct list_elem* element;
 		element = list_begin(&sleep_list);
@@ -371,14 +397,14 @@ void thread_wake(void){
 				// t->elem.next = NULL;
 				thread_unblock(t);
 			}
-			else{
+			else {
 				if (min_sleep_tick > t->tick_sleep) {
 					min_sleep_tick = t->tick_sleep;
 				}
 			}
 		}
 	}
-	intr_set_level (old_level);
+	// intr_set_level (old_level);
 }
 // [modify-alarmclock]
 
@@ -423,6 +449,7 @@ thread_create (const char *name, int priority,
 	
 	/*modify-mlfqs*/
 	t->nice = thread_current()->nice;
+	t->recent_cpu = thread_current()->recent_cpu;
 	/*modify-mlfqs*/
 
 	/* Call the kernel_thread if it scheduled.
@@ -462,8 +489,12 @@ thread_block (void) {
 	/*modify-mlfqs*/
 	if (thread_mlfqs) {
 		//TODO
-		if (curr->elem.prev != NULL && curr->elem.next != NULL) printf("why running thread is inside some list?");
-		if (strcmp(thread_current()->name, "idle")) ready_thread--;
+		if (curr->elem.prev != NULL && curr->elem.next != NULL) {
+			printf("why running thread is inside some list?");
+		}
+		if (strcmp(thread_current()->name, "idle")) {
+			ready_thread--;
+		}
 	}
 	else {
 		/*modify-mlfqs*/
@@ -477,8 +508,8 @@ thread_block (void) {
 					e = list_next(e);
 				}
 			}
-			if (e == list_tail(&ready_list)) {
-				list_remove(&curr->elem); // remove from ready list only
+			if (e == list_tail(&ready_list) || e == list_tail(&sleep_list)) {
+				list_remove(&curr->elem); // remove from ready list & sleep_list only
 				curr->elem.next = NULL;
 				curr->elem.prev = NULL;
 			}
@@ -584,8 +615,21 @@ thread_exit (void) {
 	   We will be destroyed during the call to schedule_tail(). */
 	intr_disable ();
 	/*modify-mlfqs*/
-	if (strcmp(thread_current()->name, "idle")) ready_thread--;
+	if (thread_mlfqs) {
+		if (strcmp(thread_current()->name, "idle")) ready_thread--;
+	}	
 	
+	/*modify-mlfqs*/
+	if (!strcmp(thread_current()->name, "main")) {
+		for (struct list_elem* e = list_begin(&priority_queue_list); e != list_end(&priority_queue_list); ) {
+			struct list_elem* next_e = list_next(e);
+			struct priority_queue* q = list_entry(e, struct priority_queue, elem);
+			free(q);
+			e = next_e;
+		}
+	}
+	/*modify-mlfqs*/
+
 	/*modify-mlfqs*/
 	do_schedule (THREAD_DYING);
 	NOT_REACHED ();
@@ -645,14 +689,14 @@ thread_yield (void) {
 
 /* modify-priority */
 void yield_if_lower (void){
-	enum intr_level old_level;
-	old_level = intr_disable ();
-	if (list_empty(&ready_list)) {
-		intr_set_level (old_level);
-		return;
-	}
+	// enum intr_level old_level;
+	// old_level = intr_disable ();
 	int curr_priority = thread_current()->priority;
 	if (!thread_mlfqs){
+		if (list_empty(&ready_list)) {
+			// intr_set_level (old_level);
+			return;
+		}
 		int highest_priority = list_entry(list_begin(&ready_list), struct thread, elem)->priority;
 		if (curr_priority < highest_priority){
 			thread_yield();
@@ -674,7 +718,7 @@ void yield_if_lower (void){
 			thread_yield();
 		}
 	}
-	intr_set_level (old_level);
+	// intr_set_level (old_level);
 	/*modify-mlfqs*/
 }
 /* modify-priority */
@@ -688,7 +732,7 @@ thread_set_priority (int new_priority) {
 	int max_priority = -1;
 	for (struct list_elem* e = list_begin(hll); e != list_end(hll); e = list_next(e)) {
 		if (list_empty(&list_entry(e, struct lock, elem)->semaphore.waiters)) continue;
-		struct thread* t = list_entry(list_front(&list_entry(e, struct lock, elem)->semaphore.waiters), struct thread, elem);
+		struct thread* t = list_entry(list_front(&list_entry(e, struct lock, elem)->semaphore.waiters), struct thread, sema_elem);
 		if (t->priority > max_priority) max_priority = t->priority;
 	}
 	if (new_priority > max_priority){
@@ -707,7 +751,16 @@ thread_get_priority (void) {
 void
 thread_set_nice (int nice) {
 	/* TODO: Your implementation goes here */
-	thread_current()->nice = nice;
+	struct thread* curr = thread_current();
+	curr->nice = nice;
+	int curr_p; // fixed_point of current priority value
+	int p_max = int_to_fixed_p(PRI_MAX);
+	curr_p = fixed_p_sub_fixed_p(p_max, fixed_p_add_fixed_p(fixed_p_div_int(curr->recent_cpu, 4), fixed_p_mul_int(curr->nice, 2)));
+	curr->priority = fixed_p_to_int_down(curr_p);
+
+	clip_priority(curr);
+
+	yield_if_lower();
 }
 
 /* Returns the current thread's nice value. */
@@ -807,10 +860,16 @@ init_thread (struct thread *t, const char *name, int priority) {
    idle_thread. */
 static struct thread *
 next_thread_to_run (void) {
-	if (list_empty (&ready_list))
-		return idle_thread;
 	/*modify-priority*/
-	else if (!thread_mlfqs) {
+	if (!thread_mlfqs) {
+		if (list_empty (&ready_list)) {
+			if (is_interior(&idle_thread->elem)) {
+				list_remove(&idle_thread->elem);
+				idle_thread->elem.next = NULL;
+				idle_thread->elem.prev = NULL;
+			}
+			return idle_thread;
+		}
 		struct list_elem* e_;
 		for (struct list_elem* e = list_begin(&ready_list); e != list_end(&ready_list);
 			 e = list_next(e)) {
@@ -839,12 +898,18 @@ next_thread_to_run (void) {
 		for (struct list_elem* e_ql = list_begin(&priority_queue_list); e_ql != list_end(&priority_queue_list); e_ql = list_next(e_ql)) {
 			struct priority_queue* q = list_entry(e_ql, struct priority_queue, elem);
 			if (!list_empty(&q->queue)) {
-				t = list_pop_front(&q->queue);
+				t = list_entry(list_pop_front(&q->queue), struct thread, elem);
+				t->elem.next = NULL;
+				t->elem.prev = NULL;
 				break;
 			}
-			else{
-				continue;
+		}
+		if (t == idle_thread) {
+			if (is_interior(&idle_thread->elem)) {
+				list_remove(&idle_thread->elem);
 			}
+			idle_thread->elem.next = NULL;
+			idle_thread->elem.prev = NULL;
 		}
 		return t;
 	}

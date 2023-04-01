@@ -53,7 +53,7 @@ timer_calibrate (void) {
 	unsigned high_bit, test_bit;
 
 	ASSERT (intr_get_level () == INTR_ON);
-	// printf ("Calibrating timer...  ");
+	printf ("Calibrating timer...  ");
 
 	/* Approximate loops_per_tick as the largest power-of-two
 	   still less than one timer tick. */
@@ -75,10 +75,10 @@ timer_calibrate (void) {
 /* Returns the number of timer ticks since the OS booted. */
 int64_t
 timer_ticks (void) {
-	enum intr_level old_level = intr_disable ();
+	// enum intr_level old_level = intr_disable ();
 	int64_t t = ticks;
-	intr_set_level (old_level);
-	barrier ();
+	// intr_set_level (old_level);
+	// barrier ();
 	return t;
 }
 
@@ -128,7 +128,8 @@ timer_interrupt (struct intr_frame *args UNUSED) {
 	thread_tick ();
 
 	// [modify-alarmclock]
-	if (ticks % 4 == 0) thread_wake();
+	// if (ticks % 4 == 0) thread_wake();
+	thread_wake();
 	// [modify-alarmclock]
 }
 

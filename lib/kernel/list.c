@@ -158,6 +158,8 @@ void
 list_insert (struct list_elem *before, struct list_elem *elem) {
 	ASSERT (is_interior (before) || is_tail (before));
 	ASSERT (elem != NULL);
+	// modify-mlfqs
+	ASSERT (before != elem);
 
 	elem->prev = before->prev;
 	elem->next = before;
