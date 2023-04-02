@@ -237,7 +237,7 @@ thread_tick (void) {
 		kernel_ticks++;
 
 	/*modify-mlfqs*/
-	curr->recent_cpu++;
+	curr->recent_cpu = fixed_p_add_int(curr->recent_cpu, 1);
 	/*modify-mlfqs*/
 
 	/* Enforce preemption. */
@@ -264,9 +264,10 @@ thread_tick (void) {
 			for (struct list_elem* e_ql = list_begin(&priority_queue_list); e_ql != list_end(&priority_queue_list); e_ql = list_next(e_ql)) {
 				struct priority_queue* q = list_entry(e_ql, struct priority_queue, elem);
 				for (struct list_elem* e_q = list_begin(&q->queue); e_q != list_end(&q->queue); e_q = list_next(e_q)) {
-					r_t++;
+					if (list_entry(e_q, struct thread, elem) != idle_thread) r_t++;
 				}
 			}
+			
 			// load_avg = fixed_p_add_fixed_p(fixed_p_mul_fixed_p(alpha, load_avg), fixed_p_mul_int(beta, ready_thread));
 			load_avg = fixed_p_add_fixed_p(fixed_p_mul_fixed_p(alpha, load_avg), fixed_p_mul_int(beta, r_t));
 			barrier();
@@ -298,7 +299,7 @@ thread_tick (void) {
 				for (struct list_elem* e_q = list_begin(&q->queue); e_q != list_end(&q->queue); ) {
 					struct thread* th = list_entry(e_q, struct thread, elem);
 					int p; // fixed_point of priority value
-					p = fixed_p_sub_fixed_p(p_max, fixed_p_add_fixed_p(fixed_p_div_int(th->recent_cpu, 4), fixed_p_mul_int(th->nice, 2)));
+					p = fixed_p_sub_fixed_p(p_max, fixed_p_add_fixed_p(fixed_p_div_int(th->recent_cpu, 4), int_to_fixed_p(th->nice * 2)));
 					th->priority = fixed_p_to_int_down(p);
 
 					clip_priority(th);
@@ -322,7 +323,7 @@ thread_tick (void) {
 
 			// priority update current thread
 			int curr_p; // fixed_point of current priority value
-			curr_p = fixed_p_sub_fixed_p(p_max, fixed_p_add_fixed_p(fixed_p_div_int(curr->recent_cpu, 4), fixed_p_mul_int(curr->nice, 2)));
+			curr_p = fixed_p_sub_fixed_p(p_max, fixed_p_add_fixed_p(fixed_p_div_int(curr->recent_cpu, 4), int_to_fixed_p(curr->nice * 2)));
 			curr->priority = fixed_p_to_int_down(curr_p);
 
 			clip_priority(curr);
@@ -331,7 +332,7 @@ thread_tick (void) {
 			for (struct list_elem* e_s = list_begin(&sleep_list); e_s != list_end(&sleep_list); e_s = list_next(e_s)) {
 				struct thread* t = list_entry(e_s, struct thread, elem);
 				int p_s;
-				p_s = fixed_p_sub_fixed_p(p_max, fixed_p_add_fixed_p(fixed_p_div_int(t->recent_cpu, 4), fixed_p_mul_int(t->nice, 2)));
+				p_s = fixed_p_sub_fixed_p(p_max, fixed_p_add_fixed_p(fixed_p_div_int(t->recent_cpu, 4), int_to_fixed_p(t->nice * 2)));
 				t->priority = fixed_p_to_int_down(p_s);
 
 				clip_priority(t);
@@ -737,7 +738,7 @@ thread_set_priority (int new_priority) {
 	}
 	if (new_priority > max_priority){
 		curr->priority = new_priority;
-	} 
+	}
 	yield_if_lower();
 }
 
@@ -755,9 +756,8 @@ thread_set_nice (int nice) {
 	curr->nice = nice;
 	int curr_p; // fixed_point of current priority value
 	int p_max = int_to_fixed_p(PRI_MAX);
-	curr_p = fixed_p_sub_fixed_p(p_max, fixed_p_add_fixed_p(fixed_p_div_int(curr->recent_cpu, 4), fixed_p_mul_int(curr->nice, 2)));
+	curr_p = fixed_p_sub_fixed_p(p_max, fixed_p_add_fixed_p(fixed_p_div_int(curr->recent_cpu, 4), int_to_fixed_p(curr->nice * 2)));
 	curr->priority = fixed_p_to_int_down(curr_p);
-
 	clip_priority(curr);
 
 	yield_if_lower();

@@ -127,7 +127,8 @@ test_mlfqs_load_60 (void)
       thread_create (name, PRI_DEFAULT, load_thread, NULL);
     }
   msg ("Starting threads took %d seconds.",
-       timer_elapsed (start_time) / TIMER_FREQ);
+      //  timer_elapsed (start_time) / TIMER_FREQ);
+       timer_elapsed (start_time));
   
   for (i = 0; i < 90; i++) 
     {
@@ -148,7 +149,7 @@ load_thread (void *aux UNUSED)
   int64_t exit_time = spin_time + 60 * TIMER_FREQ;
 
   thread_set_nice (20);
-   (sleep_time - timer_elapsed (start_time));
+  timer_sleep (sleep_time - timer_elapsed (start_time));
   while (timer_elapsed (start_time) < spin_time)
     continue;
   timer_sleep (exit_time - timer_elapsed (start_time));

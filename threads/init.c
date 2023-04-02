@@ -79,9 +79,7 @@ main (void) {
 
 	/* Initialize ourselves as a thread so we can use locks,
 	   then enable console locking. */
-	printf("main-1\n");
 	thread_init ();
-	printf("main0\n");
 	console_init ();
 
 	/* Initialize memory system. */
